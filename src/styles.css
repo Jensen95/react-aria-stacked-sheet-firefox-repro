@@ -70,3 +70,9 @@ main {
     transform: translateZ(-120px);
   }
 }
+
+/* Workaround (?workaround=1): stop the bottom backdrop's swipe animation while a sheet is stacked
+   on it, so it can't latch onto the new sheet's same-named timeline. */
+.workaround .react-aria-SheetBackdrop[data-has-descendants] {
+  animation: none !important;
+}
