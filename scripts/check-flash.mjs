@@ -1,7 +1,8 @@
 // Builds the app, serves it with `vite preview`, then in Firefox (scroll-driven animations pref on)
-// and Chromium opens sheet A, opens sheet B on top, closes B, and samples every animation frame:
-// the dim each SheetBackdrop paints (opacity x background alpha) and which dialog the bottom
-// backdrop's animation timeline is attached to. Usage: npm run check [-- --headed]
+// and Chromium, in ONE page load, runs: open A, open B, close B, open B, close B, close A, open A,
+// open B, close B. It samples every animation frame: the dim each SheetBackdrop paints (opacity x
+// background alpha) and which dialog the bottom backdrop's animation timeline is attached to.
+// Usage: npm run check [-- --headed]
 import { spawn, spawnSync } from 'node:child_process'
 import { chromium, firefox } from 'playwright'
 
@@ -11,10 +12,13 @@ const BASE = `http://localhost:${PORT}/`
 const NO_DIM = 0.05
 
 function sampler() {
+  const ids = new WeakMap()
   const labelOf = (el) => {
     if (!el) return 'none'
     const title = el.querySelector?.('[slot="title"]')
-    return title ? `${title.textContent} dialog` : el.tagName.toLowerCase()
+    if (!title) return el.tagName.toLowerCase()
+    if (!ids.has(el)) ids.set(el, ids.n = (ids.n ?? 0) + 1)
+    return `${title.textContent}#${ids.get(el)}`
   }
   const alphaOf = (color) => {
     const m = color.match(/rgba?\(([^)]+)\)/)
@@ -55,6 +59,10 @@ function sampler() {
         animationTimeline: cs.animationTimeline,
         timeline: tl ? tl.constructor.name : 'none',
         subject: tl && 'subject' in tl ? labelOf(tl.subject) : tl ? 'n/a' : 'none',
+        connected: tl && 'subject' in tl ? !!tl.subject?.isConnected : null,
+        tlTime: tl ? String(tl.currentTime) : 'none',
+        playState: anim?.playState ?? 'none',
+        progress: anim?.effect?.getComputedTiming().progress ?? null,
       }
     })
     const dialogs = [...document.querySelectorAll('[data-sheet-content]')].map((d) => {
@@ -85,17 +93,42 @@ async function run(name, launch, workaround) {
   const supportsViewTimeline = await page.evaluate(() => CSS.supports('animation-timeline: view()'))
   const version = browser.version()
 
-  await page.getByRole('button', { name: 'Open sheet A' }).click()
+  const phase = (p) => page.evaluate((p) => (window.__phase = p), p)
+  const openA = () => page.getByRole('button', { name: 'Open sheet A' }).click()
+  const openB = async () => {
+    await page.getByRole('button', { name: 'Open sheet B' }).click()
+    await page.getByRole('dialog', { name: 'Sheet B' }).waitFor()
+  }
+  const closeB = async () => {
+    await page.getByRole('button', { name: 'Close sheet B' }).click()
+    await page.getByRole('dialog', { name: 'Sheet B' }).waitFor({ state: 'detached' })
+  }
+  const settle = (ms = 1000) => page.waitForTimeout(ms)
+  await openA()
   await page.getByRole('dialog', { name: 'Sheet A' }).waitFor()
-  await page.waitForTimeout(1200)
-  await page.evaluate(() => (window.__phase = 'open B'))
-  await page.getByRole('button', { name: 'Open sheet B' }).click()
-  await page.getByRole('dialog', { name: 'Sheet B' }).waitFor()
-  await page.waitForTimeout(1200)
-  await page.evaluate(() => (window.__phase = 'close B'))
-  await page.getByRole('button', { name: 'Close sheet B' }).click()
-  await page.getByRole('dialog', { name: 'Sheet B' }).waitFor({ state: 'detached' })
-  await page.waitForTimeout(800)
+  await settle(1200)
+  for (const n of [1, 2]) {
+    await phase(`B${n} open`)
+    await openB()
+    await settle()
+    await phase(`B${n} close`)
+    await closeB()
+    await settle(800)
+  }
+  await phase('A close')
+  await page.keyboard.press('Escape')
+  await page.getByRole('dialog', { name: 'Sheet A' }).waitFor({ state: 'detached' })
+  await settle(800)
+  await phase('A reopen')
+  await openA()
+  await page.getByRole('dialog', { name: 'Sheet A' }).waitFor()
+  await settle(1200)
+  await phase('B3 open')
+  await openB()
+  await settle()
+  await phase('B3 close')
+  await closeB()
+  await settle(800)
   const samples = await page.evaluate(() => window.__samples)
   const nameHistory = await page.evaluate(() =>
     [...window.__names].map(([d, seq]) => `${d.querySelector('[slot="title"]')?.textContent}: ${seq.join(' -> ')}`),
@@ -106,34 +139,19 @@ async function run(name, launch, workaround) {
     `\n=== ${name}${workaround ? ' + workaround (?workaround=1)' : ''} — ${version}, CSS.supports('animation-timeline: view()') = ${supportsViewTimeline}`,
   ]
   lines.push(`  view-timeline-name history per dialog: ${nameHistory.join('; ')}`)
+  lines.push('  bottom = stackIndex-0 backdrop: timeline subject, timeline type, timeline currentTime, animation state, progress, opacity')
   let flashed = false
-  for (const phase of ['open B', 'close B']) {
-    const s = samples.filter((x) => x.phase === phase)
-    const t0 = s[0].t
+  const bottom = (x) => x.backdrops.find((b) => b.stackIndex === '0')
+  const fmt = (b) =>
+    b ? `${b.subject}${b.connected === false ? '(detached)' : ''} ${b.timeline} t=${b.tlTime} ${b.playState} p=${b.progress?.toFixed?.(2)} op=${b.opacity.toFixed(2)}` : 'no backdrop'
+  for (const ph of [...new Set(samples.map((x) => x.phase))].filter((p) => p !== 'idle')) {
+    const s = samples.filter((x) => x.phase === ph)
     const noDim = s.filter((x) => x.dim < NO_DIM)
-    const bottom = (x) => x.backdrops.find((b) => b.stackIndex === '0')
-    const boundToB = s.filter((x) => bottom(x)?.subject === 'Sheet B dialog')
-    flashed ||= noDim.length > 0
+    if (!ph.startsWith('A')) flashed ||= noDim.length > 0
     lines.push(
-      `  ${phase}: ${s.length} frames, min dim ${Math.min(...s.map((x) => x.dim)).toFixed(3)} (A alone = 0.400), ` +
-        `${noDim.length} frames with no dim (< ${NO_DIM}), ` +
-        `${boundToB.length} frames with bottom backdrop's timeline subject = Sheet B dialog`,
+      `  ${ph.padEnd(9)} min dim ${Math.min(...s.map((x) => x.dim)).toFixed(2)}, ${String(noDim.length).padStart(2)} frames < ${NO_DIM} | ` +
+        `first: ${fmt(bottom(s[0]))} | last: ${fmt(bottom(s.at(-1)))}`,
     )
-    const dipped = s.filter((x) => x.dim < 0.39)
-    if (dipped.length)
-      lines.push(
-        `    dim below 0.39 from +${(dipped[0].t - t0).toFixed(0)}ms to +${(dipped.at(-1).t - t0).toFixed(0)}ms`,
-      )
-    // Print the frames around the first dip (or the first few frames when there is none).
-    const first = Math.max(0, s.findIndex((x) => x.dim < 0.39))
-    for (const x of s.slice(Math.max(0, first - 2), first + 6)) {
-      const b = bottom(x)
-      lines.push(
-        `    +${(x.t - t0).toFixed(0).padStart(4)}ms dim=${x.dim.toFixed(3)} ` +
-          `bottom: opacity=${b?.opacity.toFixed(3)} timeline=${b?.timeline}(${b?.animationTimeline}) subject=${b?.subject}` +
-          `${b?.hasDescendants ? ' [has-descendants]' : ''} | ${x.dialogs.join(' ')}`,
-      )
-    }
   }
   lines.push(`  RESULT: ${flashed ? 'FLASH — frames with no dim behind the sheets' : 'no flash'}`)
   console.log(lines.join('\n'))
