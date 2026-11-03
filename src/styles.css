@@ -1,0 +1,72 @@
+html,
+body {
+  margin: 0;
+  background: #fff;
+  color: #111;
+  font-family: system-ui, sans-serif;
+}
+
+main {
+  padding: 24px;
+}
+
+.react-aria-Sheet {
+  background: #fff;
+  box-shadow: 0 8px 40px rgb(0 0 0 / 0.25);
+  height: auto;
+  max-height: calc(100% - 32px);
+  width: calc(100% - 24px);
+  max-width: 800px;
+  margin: 12px;
+  border-radius: 32px;
+  overflow: clip;
+  z-index: 1;
+  transform: perspective(1000px);
+  transform-origin: center -150px;
+  will-change: transform;
+
+  .sheet-handle {
+    position: absolute;
+    z-index: 2;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 80px;
+    height: 6px;
+    border-radius: 6px;
+    background: #ccc;
+  }
+}
+
+/* Only the bottom-most sheet dims the page, as in the starter. */
+.react-aria-SheetBackdrop[data-stack-index='0'] {
+  background: rgb(0 0 0 / 0.4);
+}
+
+.react-aria-SheetContent {
+  padding: 32px;
+  padding-bottom: calc(32px + var(--sheet-scroll-padding-y));
+  box-sizing: border-box;
+  height: 100%;
+  outline: none;
+  overflow: hidden;
+}
+
+.react-aria-SheetOverlay[data-expanded] .react-aria-SheetContent {
+  overflow: auto;
+}
+
+@keyframes sheet-backdrop {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes sheet-scale-back {
+  to {
+    transform: translateZ(-120px);
+  }
+}
